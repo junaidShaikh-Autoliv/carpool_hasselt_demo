@@ -4,6 +4,7 @@ import json
 import time
 import math
 import random
+import re
 from datetime import datetime
 from dateutil import tz
 
@@ -343,6 +344,210 @@ def generate_passengers_500(office_lat, office_lon, n=N_SAMPLES, radius_km=SAMPL
 
 
 # ------------------------------------------------------------
+# Demo data for Hasselt, Belgium
+# ------------------------------------------------------------
+
+HASSELT_UNIVERSITY_LAT = 50.9300
+HASSELT_UNIVERSITY_LON = 5.3320
+
+DEMO_HASSELT_DRIVERS = [
+    {
+        "driver_key": "hasselt_a",
+        "driver_id": "H001",
+        "name": "Ella",
+        "sex": "Female",
+        "home_lat": 50.9415,
+        "home_lon": 5.3378,
+        "description": "Near Diepenbeek campus, 1.3 km from Hasselt University",
+    },
+    {
+        "driver_key": "hasselt_b",
+        "driver_id": "H002",
+        "name": "Lukas",
+        "sex": "Male",
+        "home_lat": 50.9162,
+        "home_lon": 5.2925,
+        "description": "West of Hasselt city center, 4.8 km from campus",
+    },
+    {
+        "driver_key": "hasselt_c",
+        "driver_id": "H003",
+        "name": "Mia",
+        "sex": "Female",
+        "home_lat": 50.9740,
+        "home_lon": 5.4381,
+        "description": "Northeast of Hasselt, 10 km from the university",
+    },
+    {
+        "driver_key": "hasselt_d",
+        "driver_id": "H004",
+        "name": "Noah",
+        "sex": "Male",
+        "home_lat": 50.8202,
+        "home_lon": 5.3254,
+        "description": "South of Hasselt, 12 km from campus",
+    },
+]
+
+
+def get_hasselt_demo_drivers():
+    return DEMO_HASSELT_DRIVERS
+
+
+def apply_hasselt_demo_driver(driver_key):
+    demo = next((d for d in DEMO_HASSELT_DRIVERS if d["driver_key"] == driver_key), None)
+    if demo is None:
+        return
+
+    st.session_state.demo_mode = True
+    st.session_state.demo_scenario = "Hasselt University demo"
+    st.session_state.demo_driver_key = driver_key
+    st.session_state.offline_mode = False
+    st.session_state.offline_passenger_pool = None
+    st.session_state.driver_id = demo["driver_id"]
+    st.session_state.driver_sex = demo["sex"]
+    st.session_state.office_lat = HASSELT_UNIVERSITY_LAT
+    st.session_state.office_lon = HASSELT_UNIVERSITY_LON
+    st.session_state.home_lat = demo["home_lat"]
+    st.session_state.home_lon = demo["home_lon"]
+    st.session_state.gps_key = None
+    st.session_state.passenger_pool = None
+    st.session_state.selected_passengers = set()
+    st.session_state.selected_profiles = {}
+    st.session_state.last_refresh_epoch = int(time.time())
+
+
+def reset_live_mode():
+    st.session_state.demo_mode = False
+    st.session_state.demo_scenario = "Live mode"
+    st.session_state.demo_driver_key = None
+    st.session_state.offline_mode = False
+    st.session_state.offline_passenger_pool = None
+    st.session_state.driver_id = f"D{random.randint(1000, 9999)}"
+    st.session_state.driver_sex = random.choice(["Male", "Female"])
+    st.session_state.office_lat = 12.971600
+    st.session_state.office_lon = 77.594600
+    st.session_state.home_lat = float(st.session_state.office_lat + 0.050000)
+    st.session_state.home_lon = float(st.session_state.office_lon - 0.050000)
+    st.session_state.gps_key = None
+    st.session_state.passenger_pool = None
+    st.session_state.selected_passengers = set()
+    st.session_state.selected_profiles = {}
+    st.session_state.last_refresh_epoch = int(time.time())
+
+
+# ------------------------------------------------------------
+# Offline data loading for Hasselt demo
+# ------------------------------------------------------------
+
+def load_hasselt_offline_dataset(file_path):
+    """Load Hasselt demo dataset from Excel file (multi-sheet: Drivers, Passengers)."""
+    try:
+        df_drivers = pd.read_excel(file_path, sheet_name="Drivers")
+        df_passengers = pd.read_excel(file_path, sheet_name="Passengers")
+
+        required_driver_cols = ["passenger_id", "home_lat", "home_lon", "office_lat", "office_lon", "days", "trip_start_time", "tolerance_wait_min", "sex"]
+        missing_driver = [c for c in required_driver_cols if c not in df_drivers.columns]
+        if missing_driver:
+            return None, f"Drivers sheet missing: {missing_driver}"
+
+        required_passenger_cols = ["passenger_id", "home_lat", "home_lon", "days", "trip_start_time", "tolerance_wait_min", "sex", "deal_sensitivity"]
+        missing_passenger = [c for c in required_passenger_cols if c not in df_passengers.columns]
+        if missing_passenger:
+            return None, f"Passengers sheet missing: {missing_passenger}"
+
+        return (df_drivers, df_passengers), None
+    except Exception as e:
+        return None, f"Error: {str(e)}"
+
+
+def normalize_time_value(value, default="08:30"):
+    """Return a clean HH:MM string from Excel/Streamlit values."""
+    if pd.isna(value):
+        return default
+    if hasattr(value, "strftime"):
+        try:
+            return value.strftime("%H:%M")
+        except Exception:
+            pass
+    if isinstance(value, pd.Timedelta):
+        total_minutes = int(value.total_seconds() // 60) % (24 * 60)
+        return minutes_to_hhmm(total_minutes)
+    s = str(value).strip()
+    if not s or s.lower() in {"nan", "nat", "none"}:
+        return default
+    try:
+        if re.match(r"^\d{1,2}:\d{2}(:\d{2})?$", s):
+            parts = s.split(":")
+            return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+        numeric = float(s)
+        if 0 <= numeric < 1:
+            total_minutes = int(round(numeric * 24 * 60)) % (24 * 60)
+            return minutes_to_hhmm(total_minutes)
+    except Exception:
+        pass
+    return default
+
+
+def get_first_existing_value(row, column_names, default=None):
+    """Read the first available value from a list of possible Excel column names."""
+    for col in column_names:
+        if col in row.index and not pd.isna(row[col]):
+            return row[col]
+    return default
+
+def apply_offline_dataset(driver_df, passenger_df, selected_driver_id):
+    """Apply offline dataset to session state and select a specific driver."""
+    try:
+        selected_driver = driver_df[driver_df["passenger_id"] == selected_driver_id]
+        if len(selected_driver) == 0:
+            return False, f"Driver {selected_driver_id} not found"
+
+        driver_row = selected_driver.iloc[0]
+        st.session_state.demo_mode = True
+        st.session_state.demo_driver_key = f"offline_{selected_driver_id}"
+        st.session_state.offline_mode = True
+        st.session_state.driver_id = selected_driver_id
+        st.session_state.driver_sex = str(driver_row.get("sex", "Male"))
+
+        st.session_state.office_lat = float(driver_row.get("office_lat", HASSELT_UNIVERSITY_LAT))
+        st.session_state.office_lon = float(driver_row.get("office_lon", HASSELT_UNIVERSITY_LON))
+        st.session_state.home_lat = float(driver_row["home_lat"])
+        st.session_state.home_lon = float(driver_row["home_lon"])
+
+        # Offline passenger data is the source of truth.
+        st.session_state.offline_passenger_pool = passenger_df.copy()
+        st.session_state.passenger_pool = passenger_df.copy()
+
+        days_str = str(driver_row.get("days", "Mon,Tue,Wed,Thu,Fri"))
+        selected_days = [d.strip() for d in days_str.split(",") if d.strip() in DAYS]
+        st.session_state.selected_days = selected_days if selected_days else ["Mon", "Tue", "Wed", "Thu", "Fri"]
+        for d in DAYS:
+            st.session_state[f"day_{d}"] = d in st.session_state.selected_days
+
+        st.session_state.driver_start_time = normalize_time_value(driver_row.get("trip_start_time", "08:30"), default="08:30")
+        st.session_state.waiting_tol = int(get_first_existing_value(driver_row, ["tolerance_wait_min", "waiting_tol", "wait_tolerance_min"], 15))
+
+        seats_val = get_first_existing_value(driver_row, ["num_of_seats_avail", "NUM_OF_SEATS_AVAIL", "seats_available", "available_seats", "seats", "number_of_seats"], st.session_state.get("seats", 3))
+        st.session_state.seats = int(max(1, min(6, int(seats_val))))
+
+        st.session_state.gps_key = (
+            round(float(st.session_state.office_lat), 6),
+            round(float(st.session_state.office_lon), 6),
+            round(float(st.session_state.home_lat), 6),
+            round(float(st.session_state.home_lon), 6),
+        )
+        st.session_state.selected_passengers = set()
+        st.session_state.selected_profiles = {}
+        st.session_state.pending_requests = []
+        st.session_state.alerts = []
+        st.session_state.last_refresh_epoch = int(time.time())
+        return True, f"✅ Loaded offline driver {selected_driver_id} with {len(passenger_df)} offline passengers"
+    except Exception as e:
+        return False, str(e)
+
+
+# ------------------------------------------------------------
 # Filtering rules
 # ------------------------------------------------------------
 
@@ -366,6 +571,88 @@ def filter_by_time(df, driver_start_min, driver_wait_tol):
 
     return df[df.apply(ok, axis=1)].copy()
 
+
+
+
+def normalize_match_weights(w_days, w_radius, w_time):
+    """Normalize three user-defined weights so their sum is exactly 1."""
+    values = np.array([float(w_days), float(w_radius), float(w_time)], dtype=float)
+    values = np.clip(values, 0, None)
+    total = float(values.sum())
+    if total <= 0:
+        values = np.array([0.34, 0.33, 0.33], dtype=float)
+        total = float(values.sum())
+    values = values / total
+    return float(values[0]), float(values[1]), float(values[2])
+
+
+def add_weighted_match_scores(df, driver_days_set, pickup_radius_km, driver_start_min, driver_wait_tol, weight_days, weight_radius, weight_time):
+    """Add weighted compatibility scores for day overlap, pickup radius, and trip start time."""
+    out = df.copy()
+
+    def day_score(pass_days):
+        p_days = set([d.strip() for d in str(pass_days).split(",") if d.strip()])
+        if not driver_days_set:
+            return 1.0
+        if not p_days:
+            return 0.0
+        return len(p_days.intersection(driver_days_set)) / max(1, len(driver_days_set))
+
+    def radius_score(dist_km):
+        dist_km = float(dist_km)
+        radius = max(float(pickup_radius_km), 0.001)
+        if dist_km <= radius:
+            return 1.0
+        return max(0.0, 1.0 - ((dist_km - radius) / radius))
+
+    def time_score(row):
+        try:
+            p_start = parse_hhmm_to_minutes(row["trip_start_time"])
+            p_tol = int(row.get("tolerance_wait_min", 0))
+            allowed = max(int(driver_wait_tol), p_tol, 1)
+            delta = abs(p_start - int(driver_start_min))
+            if delta <= allowed:
+                return 1.0
+            return max(0.0, 1.0 - ((delta - allowed) / allowed))
+        except Exception:
+            return 0.0
+
+    out["day_score"] = out["days"].apply(day_score)
+    out["radius_score"] = out["dist_to_driver_km"].apply(radius_score)
+    out["time_score"] = out.apply(time_score, axis=1)
+    out["weighted_match_score"] = (
+        float(weight_days) * out["day_score"] +
+        float(weight_radius) * out["radius_score"] +
+        float(weight_time) * out["time_score"]
+    )
+    out["match_percent"] = (out["weighted_match_score"] * 100).round(1)
+    out["match_tier"] = pd.cut(
+        out["weighted_match_score"],
+        bins=[-0.01, 0.49, 0.69, 0.84, 1.01],
+        labels=["Explorer", "Good", "Great", "Legendary"]
+    ).astype(str)
+    return out
+
+
+def pick_weighted_passengers(scored_df, top_k=TOP_K, threshold=0.70):
+    """Primary matches meet weighted threshold, then are prioritised by least distance.
+    If fewer than top_k, fill with next-best day-compatible passengers ranked by days and distance.
+    """
+    primary = scored_df[scored_df["weighted_match_score"] >= float(threshold)].copy()
+    primary = primary.sort_values(["dist_to_driver_km", "weighted_match_score"], ascending=[True, False]).head(top_k).copy()
+    primary_ids = set(primary["passenger_id"].tolist())
+    if len(primary) >= top_k:
+        primary["match_source"] = "Primary weighted match"
+        return primary, primary.copy(), primary_ids, False
+    remaining_needed = top_k - len(primary)
+    fallback = scored_df[~scored_df["passenger_id"].isin(primary_ids)].copy()
+    fallback = fallback.sort_values(["day_score", "dist_to_driver_km", "weighted_match_score"], ascending=[False, True, False]).head(remaining_needed).copy()
+    if len(primary) > 0:
+        primary["match_source"] = "Primary weighted match"
+    if len(fallback) > 0:
+        fallback["match_source"] = "Next-best day + distance"
+    combined = pd.concat([primary, fallback], ignore_index=True) if len(primary) > 0 else fallback.copy()
+    return primary, combined, primary_ids, len(fallback) > 0
 
 # ------------------------------------------------------------
 # Clustering distance to centroid (K=1), centroid fixed at driver home
@@ -424,152 +711,31 @@ def top_k_least_detour(df, k=TOP_K):
 # Best route + per-stop detour allocation (for economics)
 # ------------------------------------------------------------
 
-
-
-def optimal_best_order_indices(osrm_base, start, stops, end, ca_bundle_path="", insecure_skip_verify=False, max_exact_stops=12):
-    """Return visiting order (indices) that MINIMIZES total distance.
-
-    Objective: start -> stops (in some order) -> end.
-    Distances use route_km_only (OSRM when available, else fallback).
-
-    Exact Held–Karp DP for n <= max_exact_stops, else greedy + 2-opt.
-
-    Returns: (order_idx_list, total_km, used_all, is_exact)
-    """
-    n = len(stops)
-    if n == 0:
-        d_end, used_end = route_km_only(osrm_base, start, end, ca_bundle_path, insecure_skip_verify)
-        return [], float(d_end), bool(used_end), True
-
-    def dist(a, b):
-        return route_km_only(osrm_base, a, b, ca_bundle_path, insecure_skip_verify)
-
+def greedy_best_order(osrm_base, start, stops, end, ca_bundle_path="", insecure_skip_verify=False):
+    remaining = stops[:]
+    current = start
+    ordered = []
+    total = 0.0
     used_all = True
 
-    d_start = [0.0] * n
-    for i in range(n):
-        d, used = dist(start, stops[i])
-        d_start[i] = float(d)
-        used_all = used_all and bool(used)
-
-    d_mat = [[0.0] * n for _ in range(n)]
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            d, used = dist(stops[i], stops[j])
-            d_mat[i][j] = float(d)
-            used_all = used_all and bool(used)
-
-    d_end = [0.0] * n
-    for i in range(n):
-        d, used = dist(stops[i], end)
-        d_end[i] = float(d)
-        used_all = used_all and bool(used)
-
-    if n <= int(max_exact_stops):
-        size = 1 << n
-        INF = 1e18
-        dp = [[INF] * n for _ in range(size)]
-        parent = [[-1] * n for _ in range(size)]
-
-        for i in range(n):
-            dp[1 << i][i] = d_start[i]
-
-        for mask in range(size):
-            for last in range(n):
-                cur = dp[mask][last]
-                if cur >= INF or not (mask & (1 << last)):
-                    continue
-                rem = (~mask) & (size - 1)
-                j = rem
-                while j:
-                    lsb = j & -j
-                    nxt = lsb.bit_length() - 1
-                    new_mask = mask | lsb
-                    cand = cur + d_mat[last][nxt]
-                    if cand < dp[new_mask][nxt]:
-                        dp[new_mask][nxt] = cand
-                        parent[new_mask][nxt] = last
-                    j -= lsb
-
-        full = size - 1
-        best_total = INF
-        best_last = -1
-        for last in range(n):
-            cand = dp[full][last] + d_end[last]
-            if cand < best_total:
-                best_total = cand
-                best_last = last
-
-        order = []
-        mask = full
-        last = best_last
-        while last != -1:
-            order.append(last)
-            pl = parent[mask][last]
-            mask ^= (1 << last)
-            last = pl
-        order.reverse()
-
-        return order, float(best_total), bool(used_all), True
-
-    # heuristic
-    remaining = list(range(n))
-    cur_pt = start
-    order = []
     while remaining:
-        best_idx = None
-        best_d = None
-        for idx in remaining:
-            d, _used = dist(cur_pt, stops[idx])
-            if best_d is None or d < best_d:
-                best_d = d
-                best_idx = idx
-        order.append(best_idx)
-        remaining.remove(best_idx)
-        cur_pt = stops[best_idx]
+        best_i, best_d, best_used = None, 1e18, True
+        for i, s in enumerate(remaining):
+            d, used = route_km_only(osrm_base, current, s, ca_bundle_path, insecure_skip_verify)
+            if d < best_d:
+                best_i, best_d, best_used = i, d, used
+        nxt = remaining.pop(best_i)
+        ordered.append(nxt)
+        total += best_d
+        used_all = used_all and best_used
+        current = nxt
 
-    def route_len(ord_idx):
-        total = 0.0
-        cur = start
-        for k in ord_idx:
-            total += float(dist(cur, stops[k])[0])
-            cur = stops[k]
-        total += float(dist(cur, end)[0])
-        return float(total)
+    d_end, used_end = route_km_only(osrm_base, current, end, ca_bundle_path, insecure_skip_verify)
+    total += d_end
+    used_all = used_all and used_end
 
-    best_len = route_len(order)
-    improved = True
-    while improved:
-        improved = False
-        for i in range(n - 1):
-            for j in range(i + 1, n):
-                new = order[:i] + list(reversed(order[i:j+1])) + order[j+1:]
-                new_len = route_len(new)
-                if new_len + 1e-9 < best_len:
-                    order = new
-                    best_len = new_len
-                    improved = True
-                    break
-            if improved:
-                break
-
-    return order, float(best_len), bool(used_all), False
-
-def greedy_best_order(osrm_base, start, stops, end, ca_bundle_path="", insecure_skip_verify=False):
-    """Backward-compatible name.
-
-    IMPORTANT: This now returns the order that minimizes TOTAL distance to office
-    (exact DP for small N, heuristic otherwise).
-
-    Returns: (ordered_stops, total_km, used_all)
-    """
-    order_idx, total, used_all, _is_exact = optimal_best_order_indices(
-        osrm_base, start, stops, end, ca_bundle_path, insecure_skip_verify
-    )
-    ordered = [stops[i] for i in order_idx]
     return ordered, float(total), bool(used_all)
+
 
 def allocate_detours_by_stop(osrm_base, driver_home, ordered_stops, office,
                              ca_bundle_path="", insecure_skip_verify=False):
@@ -591,12 +757,23 @@ def allocate_detours_by_stop(osrm_base, driver_home, ordered_stops, office,
 
 # ------------------------------------------------------------
 # Pricing / economics (NO CAP)
-# payment_i = (1-alpha)*solo_avoided_cost_i + detour_cost_i
+# payment_i = (1-alpha)*solo_avoided_cost_i + passenger_detour_cost_i
 # ------------------------------------------------------------
 
 def compute_pricing_and_economics(osrm_base, cost_per_km, alpha,
                                  driver_home, office, selected_profiles,
                                  ca_bundle_path="", insecure_skip_verify=False):
+    """Compute pricing using contribution-based detour allocation.
+
+    New detour-cost rule:
+    1. Compute driver solo distance: driver_home -> office.
+    2. Compute optimized shared route distance: driver_home -> selected pickups -> office.
+    3. Total detour distance = max(0, shared route distance - solo distance).
+    4. Allocate incremental detour to each selected passenger based on the route order.
+    5. Each passenger pays their own detour contribution, not an equal split.
+    6. If passengers later decline, final settlement reweights the same total detour
+       cost across accepted passengers based on their original detour contributions.
+    """
     selected_ids = list(selected_profiles.keys())
 
     base_km, _, base_used = safe_route(osrm_base, driver_home, office, ca_bundle_path, insecure_skip_verify)
@@ -609,6 +786,11 @@ def compute_pricing_and_economics(osrm_base, cost_per_km, alpha,
             "solo_cost_driver": float(solo_cost_driver),
             "shared_cost_driver": float(solo_cost_driver),
             "incremental_cost_driver": 0.0,
+            "total_detour_km": 0.0,
+            "total_detour_cost": 0.0,
+            "detour_split_count": 0,
+            "detour_share_km": 0.0,
+            "detour_cost_share": 0.0,
             "revenue": 0.0,
             "driver_benefit_vs_solo": 0.0,
             "offset_pct": 0.0,
@@ -620,7 +802,15 @@ def compute_pricing_and_economics(osrm_base, cost_per_km, alpha,
     ordered_stops, best_total_km, used_all = greedy_best_order(
         osrm_base, driver_home, stops, office, ca_bundle_path, insecure_skip_verify
     )
-    detour_km_list = allocate_detours_by_stop(osrm_base, driver_home, ordered_stops, office, ca_bundle_path, insecure_skip_verify)
+
+    # Total driver detour compared with driver solo trip.
+    total_detour_km = float(max(0.0, best_total_km - base_km))
+    total_detour_cost = float(total_detour_km * cost_per_km)
+
+    per_passenger_detour_km = allocate_detours_by_stop(
+        osrm_base, driver_home, ordered_stops, office,
+        ca_bundle_path, insecure_skip_verify
+    )
 
     # map ordered stop -> passenger id by nearest coordinate match (robust for duplicates)
     remaining = set(selected_ids)
@@ -645,7 +835,7 @@ def compute_pricing_and_economics(osrm_base, cost_per_km, alpha,
         p_solo_km, _ = route_km_only(osrm_base, p_home, office, ca_bundle_path, insecure_skip_verify)
         solo_avoided_cost = float(p_solo_km * cost_per_km)
 
-        detour_km = float(detour_km_list[idx])
+        detour_km = float(per_passenger_detour_km[idx])
         detour_cost = float(detour_km * cost_per_km)
 
         payment = float((1.0 - alpha) * solo_avoided_cost + detour_cost)
@@ -656,6 +846,9 @@ def compute_pricing_and_economics(osrm_base, cost_per_km, alpha,
             "assigned_detour_km": detour_km,
             "detour_cost": detour_cost,
             "payment": payment,
+            "total_detour_km": total_detour_km,
+            "total_detour_cost": total_detour_cost,
+            "detour_split_count": len(selected_ids),
         }
         revenue += payment
 
@@ -670,6 +863,34 @@ def compute_pricing_and_economics(osrm_base, cost_per_km, alpha,
         "solo_cost_driver": float(solo_cost_driver),
         "shared_cost_driver": float(shared_cost_driver),
         "incremental_cost_driver": float(incremental_cost_driver),
+        "total_detour_km": float(total_detour_km),
+        "total_detour_cost": float(total_detour_cost),
+        "detour_split_count": int(len(selected_ids)),
+        "detour_share_km": float(total_detour_km / max(1, len(selected_ids))),
+        "detour_cost_share": float(total_detour_cost / max(1, len(selected_ids))),
+        "revenue": float(revenue),
+        "driver_benefit_vs_solo": float(driver_benefit_vs_solo),
+        "offset_pct": float(offset_pct),
+        "passenger_breakdown": passenger_breakdown,
+        "route_used_all": bool(used_all and base_used),
+    }
+
+    shared_cost_driver = float(best_total_km * cost_per_km)
+    incremental_cost_driver = float(max(0.0, shared_cost_driver - solo_cost_driver))
+    driver_benefit_vs_solo = float(revenue - incremental_cost_driver)
+    offset_pct = float((revenue / solo_cost_driver) * 100.0) if solo_cost_driver > 1e-9 else 0.0
+
+    return {
+        "base_km": float(base_km),
+        "best_total_km": float(best_total_km),
+        "solo_cost_driver": float(solo_cost_driver),
+        "shared_cost_driver": float(shared_cost_driver),
+        "incremental_cost_driver": float(incremental_cost_driver),
+        "total_detour_km": float(total_detour_km),
+        "total_detour_cost": float(total_detour_cost),
+        "detour_split_count": int(detour_split_count),
+        "detour_share_km": float(detour_share_km),
+        "detour_cost_share": float(detour_cost_share),
         "revenue": float(revenue),
         "driver_benefit_vs_solo": float(driver_benefit_vs_solo),
         "offset_pct": float(offset_pct),
@@ -702,14 +923,18 @@ def compose_passenger_email(passenger, driver_start_time, office_label, alpha, p
         solo_km = cost_breakdown.get("passenger_solo_km", 0)
         solo_cost = cost_breakdown.get("solo_avoided_cost", 0)
         payment = cost_breakdown.get("payment", 0)
-        savings = solo_cost - payment
+        raw_savings = solo_cost - payment
+        savings = float(max(0.0, raw_savings))
+        surcharge_note = ""
+        if raw_savings < 0:
+            surcharge_note = f"\n│ Extra detour cost: €{abs(raw_savings):.2f} │"
 
         cost_section = f"""
 💰 COST BREAKDOWN:
 ┌─────────────────────────────┐
 │ Solo trip cost:    €{solo_cost:.2f}  │
 │ Your carpool cost: €{payment:.2f}  │
-│ Your savings:      €{savings:.2f}  │
+│ Your savings:      €{savings:.2f}  │{surcharge_note}
 └─────────────────────────────┘
 """.strip()
 
@@ -722,6 +947,7 @@ I noticed our commute overlaps. Would you like to share a ride to {office_label}
 🕒 Start time: {driver_start_time}
 📍 Pickup: within ~{pickup_radius_km} km
 🤝 Cost sharing: α = {alpha:.2f}. {fairness_line}
+🔧 Your detour cost is based on your contribution to the shared route, not simply split equally.
 {cost_section}
 
 {benefit_line}
@@ -793,6 +1019,42 @@ def init_state():
         st.session_state.platform_stats = load_platform_stats()
     if "driver_sessions" not in st.session_state:
         st.session_state.driver_sessions = []  # Track each driver's session results
+    if "demo_mode" not in st.session_state:
+        st.session_state.demo_mode = False
+    if "demo_scenario" not in st.session_state:
+        st.session_state.demo_scenario = "Live mode"
+    if "demo_driver_key" not in st.session_state:
+        st.session_state.demo_driver_key = None
+    if "offline_mode" not in st.session_state:
+        st.session_state.offline_mode = False
+    if "offline_passenger_pool" not in st.session_state:
+        st.session_state.offline_passenger_pool = None
+    if "w_days" not in st.session_state:
+        st.session_state.w_days = 0.34
+    if "w_radius" not in st.session_state:
+        st.session_state.w_radius = 0.33
+    if "w_time" not in st.session_state:
+        st.session_state.w_time = 0.33
+    if "match_threshold" not in st.session_state:
+        st.session_state.match_threshold = 0.70
+    if "office_lat" not in st.session_state:
+        st.session_state.office_lat = 12.971600
+    if "office_lon" not in st.session_state:
+        st.session_state.office_lon = 77.594600
+    if "home_lat" not in st.session_state:
+        st.session_state.home_lat = float(st.session_state.office_lat + 0.050000)
+    if "home_lon" not in st.session_state:
+        st.session_state.home_lon = float(st.session_state.office_lon - 0.050000)
+    if "pickup_radius_km" not in st.session_state:
+        st.session_state.pickup_radius_km = 10
+    if "seats" not in st.session_state:
+        st.session_state.seats = 3
+    if "selected_days" not in st.session_state:
+        st.session_state.selected_days = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+    if "driver_start_time" not in st.session_state:
+        st.session_state.driver_start_time = "08:30"
+    if "waiting_tol" not in st.session_state:
+        st.session_state.waiting_tol = 15
 
 
 init_state()
@@ -921,6 +1183,108 @@ if remaining == 0:
 # Process pending requests (simulated email confirmations)
 # ------------------------------------------------------------
 
+def _settle_completed_request_batches(requests):
+    """Finalize earnings after all requests in a batch have resolved.
+
+    If one or more passengers decline, the total detour cost is reallocated
+    among accepted passengers based on their original assigned detour contribution.
+    """
+    batch_ids = sorted({r.get("request_batch_id") for r in requests if r.get("request_batch_id")})
+
+    for batch_id in batch_ids:
+        batch = [r for r in requests if r.get("request_batch_id") == batch_id]
+        if not batch:
+            continue
+        if any(r.get("status") == "pending" for r in batch):
+            continue
+        if all(r.get("settled", False) for r in batch):
+            continue
+
+        accepted_reqs = [r for r in batch if r.get("status") == "accepted"]
+        accepted_count = len(accepted_reqs)
+
+        total_detour_km = float(batch[0].get("batch_total_detour_km", 0.0) or 0.0)
+        total_detour_cost = float(batch[0].get("batch_total_detour_cost", 0.0) or 0.0)
+        alpha = float(batch[0].get("alpha", 0.5) or 0.5)
+
+        accepted_weight = sum(float(r.get("assigned_detour_km", 0.0) or 0.0) for r in accepted_reqs)
+
+        for req in batch:
+            req["final_accepted_count"] = int(accepted_count)
+
+        if accepted_count > 0 and accepted_weight > 1e-9:
+            for req in accepted_reqs:
+                share = float(req.get("assigned_detour_km", 0.0) or 0.0) / accepted_weight
+                final_detour_share_km = float(total_detour_km * share)
+                final_detour_cost_share = float(total_detour_cost * share)
+
+                solo_avoided_cost = float(req.get("solo_avoided_cost", 0.0) or 0.0)
+                final_payment = float((1.0 - alpha) * solo_avoided_cost + final_detour_cost_share)
+
+                req["final_detour_share_km"] = float(final_detour_share_km)
+                req["final_detour_cost_share"] = float(final_detour_cost_share)
+                req["assigned_detour_km"] = float(final_detour_share_km)
+                req["detour_cost"] = float(final_detour_cost_share)
+                req["payment_eur"] = float(final_payment)
+                req["settled"] = True
+
+                _coins_v = float(req.get("coins_val", 0.0) or 0.0)
+                _co2 = float(req.get("co2_saved_kg", 0.0) or 0.0)
+
+                st.session_state.cumulative_confirmed_count += 1
+        elif accepted_count > 0:
+            # Fallback to equal split if no detour contribution data is available.
+            final_detour_share_km = float(total_detour_km / accepted_count)
+            final_detour_cost_share = float(total_detour_cost / accepted_count)
+            for req in accepted_reqs:
+                solo_avoided_cost = float(req.get("solo_avoided_cost", 0.0) or 0.0)
+                final_payment = float((1.0 - alpha) * solo_avoided_cost + final_detour_cost_share)
+
+                req["final_detour_share_km"] = float(final_detour_share_km)
+                req["final_detour_cost_share"] = float(final_detour_cost_share)
+                req["assigned_detour_km"] = float(final_detour_share_km)
+                req["detour_cost"] = float(final_detour_cost_share)
+                req["payment_eur"] = float(final_payment)
+                req["settled"] = True
+
+                _coins_v = float(req.get("coins_val", 0.0) or 0.0)
+                _co2 = float(req.get("co2_saved_kg", 0.0) or 0.0)
+
+                st.session_state.cumulative_confirmed_count += 1
+        else:
+            for req in batch:
+                req["final_detour_share_km"] = 0.0
+                req["final_detour_cost_share"] = 0.0
+                if req.get("status") == "accepted" and not req.get("settled", False):
+                    req["assigned_detour_km"] = 0.0
+                    req["detour_cost"] = 0.0
+                    req["payment_eur"] = float((1.0 - alpha) * float(req.get("solo_avoided_cost", 0.0) or 0.0))
+                    req["settled"] = True
+
+                    _coins_v = float(req.get("coins_val", 0.0) or 0.0)
+                    _co2 = float(req.get("co2_saved_kg", 0.0) or 0.0)
+
+                    st.session_state.cumulative_confirmed_count += 1
+                    st.session_state.cumulative_revenue += req["payment_eur"]
+                    st.session_state.cumulative_coins += _coins_v
+                    st.session_state.cumulative_co2_saved_kg += _co2
+
+                    _pstats = load_platform_stats()
+                    register_confirmation(_pstats, req.get("driver_id", st.session_state.driver_id), req["payment_eur"], _coins_v, _co2)
+                    save_platform_stats(_pstats)
+                    st.session_state.platform_stats = _pstats
+
+                elif req.get("status") == "declined":
+                    req["settled"] = True
+
+        if accepted_count > 0:
+            st.session_state.alerts.append(
+                "💶 Detour cost reallocated proportionally among accepted passengers based on each rider's detour contribution."
+            )
+        else:
+            st.session_state.alerts.append("ℹ️ No passengers accepted; no detour cost was charged.")
+
+
 def process_pending_requests():
     now_ts = time.time()
     updated = []
@@ -938,25 +1302,29 @@ def process_pending_requests():
             if accepted:
                 req["status"] = "accepted"
                 st.session_state.accepted_passengers.add(req['passenger_id'])
-                st.session_state.cumulative_confirmed_count += 1  # Track cumulative
-                # --- Record realized earnings + CO2 savings (only on acceptance) ---
-                _payment = float(req.get("payment_eur", 0.0) or 0.0)
-                _coins_v = float(req.get("coins_val", 0.0) or 0.0)
-                _co2 = float(req.get("co2_saved_kg", 0.0) or 0.0)
-                st.session_state.cumulative_revenue += _payment
-                st.session_state.cumulative_coins += _coins_v
-                st.session_state.cumulative_co2_saved_kg += _co2
-                _pstats = load_platform_stats()
-                register_confirmation(_pstats, req.get("driver_id", st.session_state.driver_id), _payment, _coins_v, _co2)
-                save_platform_stats(_pstats)
-                st.session_state.platform_stats = _pstats
                 st.session_state.alerts.append(f"✅ {req['passenger_id']} accepted your request.")
                 subj, body = compose_driver_update_email(req["passenger_id"], "accepted", req["office_label"], req["driver_start_time"])
                 write_outbox_email("to_driver_ACCEPTED", {"driver_id": req["driver_id"], "passenger_id": req["passenger_id"], "alpha": alpha, "subject": subj, "body": body, "time": now_local().isoformat()})
+
+                # Backward compatibility for old pending requests without a batch id.
+                # New requests are settled only after the whole batch is resolved.
+                if not req.get("request_batch_id") and not req.get("settled", False):
+                    _payment = float(req.get("payment_eur", 0.0) or 0.0)
+                    _coins_v = float(req.get("coins_val", 0.0) or 0.0)
+                    _co2 = float(req.get("co2_saved_kg", 0.0) or 0.0)
+                    req["settled"] = True
+                    st.session_state.cumulative_confirmed_count += 1
+                    st.session_state.cumulative_revenue += _payment
+                    st.session_state.cumulative_coins += _coins_v
+                    st.session_state.cumulative_co2_saved_kg += _co2
+                    _pstats = load_platform_stats()
+                    register_confirmation(_pstats, req.get("driver_id", st.session_state.driver_id), _payment, _coins_v, _co2)
+                    save_platform_stats(_pstats)
+                    st.session_state.platform_stats = _pstats
             else:
                 req["status"] = "declined"
                 st.session_state.declined_passengers.add(req['passenger_id'])
-                st.session_state.alerts.append(f"❌ {req['passenger_id']} declined. You can pick a replacement.")
+                st.session_state.alerts.append(f"❌ {req['passenger_id']} declined. Detour cost will be reallocated among accepted passengers based on each rider's detour contribution.")
 
                 if st.session_state.passenger_pool is not None:
                     st.session_state.passenger_pool = pd.concat([st.session_state.passenger_pool, pd.DataFrame([passenger_profile])], ignore_index=True)
@@ -966,6 +1334,7 @@ def process_pending_requests():
 
         updated.append(req)
 
+    _settle_completed_request_batches(updated)
     st.session_state.pending_requests = updated
 
 
@@ -988,31 +1357,108 @@ left, main, right = st.columns([1.2, 2.2, 1.25], gap="large")
 with left:
     st.markdown("#### 🎮 Driver Setup")
 
+    st.caption("🧪 Demo mode")
+    demo_scene = st.selectbox("Demo scenario", ["Live mode", "Hasselt University demo", "Hasselt offline dataset"], index=0 if not st.session_state.demo_mode else (1 if "offline" not in st.session_state.demo_driver_key else 2), key="demo_scenario_selector")
+    
+    if demo_scene == "Hasselt University demo":
+        driver_options = [f'{d["name"]} ({d["driver_id"]}) — {d["description"]}' for d in get_hasselt_demo_drivers()]
+        selected_demo = st.selectbox("Select demo driver", driver_options, index=0, key="demo_driver_option")
+        selected_key = get_hasselt_demo_drivers()[driver_options.index(selected_demo)]["driver_key"]
+        if st.button("Load Hasselt demo dataset", use_container_width=True):
+            apply_hasselt_demo_driver(selected_key)
+            st.experimental_rerun()
+        st.caption("This demo loads 500 sample passengers within 100 km of Hasselt University, Belgium.")
+        if st.session_state.demo_mode and st.session_state.demo_driver_key and "offline" not in st.session_state.demo_driver_key:
+            st.success(f"Demo driver loaded: {st.session_state.driver_id}", icon="✅")
+    
+    elif demo_scene == "Hasselt offline dataset":
+        st.caption("📁 Load offline data from Excel file")
+        uploaded_file = st.file_uploader("Upload hasselt_demo_dataset_offline.xlsx", type=["xlsx"], key="offline_file_uploader")
+        
+        if uploaded_file is not None:
+            data, error = load_hasselt_offline_dataset(uploaded_file)
+            if error:
+                st.error(f"Failed: {error}")
+            else:
+                df_drivers, df_passengers = data
+                driver_ids = sorted(df_drivers["passenger_id"].unique().tolist())
+                selected_driver_id = st.selectbox("Select driver", driver_ids, key="offline_driver_selector")
+                
+                if st.button("Load dataset", use_container_width=True):
+                    success, msg = apply_offline_dataset(df_drivers, df_passengers, selected_driver_id)
+                    if success:
+                        st.success(msg)
+                        st.experimental_rerun()
+                    else:
+                        st.error(msg)
+        
+        st.caption("Tip: Load hasselt_demo_dataset_offline.xlsx to start demo.")
+    
+    else:
+        if st.session_state.demo_mode:
+            if st.button("Reset to live mode", use_container_width=True):
+                reset_live_mode()
+                st.experimental_rerun()
+
+    st.markdown("---")
+    
+    # Show loaded driver info
+    if st.session_state.demo_mode and st.session_state.demo_driver_key:
+        st.info(f"✅ Active: **{st.session_state.driver_id}** ", icon="ℹ️")
+    
     st.caption("🏢 Office location (GPS)")
-    office_lat = st.number_input("Office latitude", value=12.971600, format="%.6f")
-    office_lon = st.number_input("Office longitude", value=77.594600, format="%.6f")
+    office_lat = st.number_input("Office latitude", value=float(st.session_state.office_lat), format="%.6f", key="office_lat")
+    office_lon = st.number_input("Office longitude", value=float(st.session_state.office_lon), format="%.6f", key="office_lon")
     office_label = "Office (GPS)"
 
     st.caption("🏠 Driver home/pickup location (GPS)")
-    home_lat = st.number_input("Home latitude", value=float(office_lat + 0.050000), format="%.6f")
-    home_lon = st.number_input("Home longitude", value=float(office_lon - 0.050000), format="%.6f")
+    home_lat = st.number_input("Home latitude", value=float(st.session_state.home_lat), format="%.6f", key="home_lat")
+    home_lon = st.number_input("Home longitude", value=float(st.session_state.home_lon), format="%.6f", key="home_lon")
 
-    pickup_radius_km = st.slider("📍 PICKUP_RADIUS_KM", min_value=1, max_value=100, value=10)
-    seats = st.slider("🪑 NUM_OF_SEATS_AVAIL", min_value=1, max_value=6, value=3)
+    pickup_radius_km = st.slider("📍 PICKUP_RADIUS_KM", min_value=1, max_value=100, value=int(st.session_state.pickup_radius_km))
+    st.session_state.pickup_radius_km = pickup_radius_km
+    
+    seats = st.slider("🪑 NUM_OF_SEATS_AVAIL", min_value=1, max_value=6, value=int(st.session_state.seats))
+    st.session_state.seats = seats
 
     st.caption("📅 Visiting days")
     selected_days = []
     d1, d2 = st.columns(2)
     for i, d in enumerate(DAYS):
         with (d1 if i % 2 == 0 else d2):
-            if st.checkbox(d, value=(d in ["Mon", "Tue", "Wed", "Thu", "Fri"]), key=f"day_{d}"):
+            is_selected = d in st.session_state.selected_days
+            if st.checkbox(d, value=is_selected, key=f"day_{d}"):
                 selected_days.append(d)
+    st.session_state.selected_days = selected_days
     driver_days = set(selected_days)
 
-    start_time_str = st.selectbox("🕒 TRIP_START_TIME", ["07:30", "08:00", "08:30", "09:00", "09:30", "10:00"], index=2)
+    # Include the Excel-loaded start time even if it is not one of the default dropdown values.
+    base_start_time_options = ["07:30", "08:00", "08:30", "09:00", "09:30", "10:00"]
+    current_driver_start_time = normalize_time_value(st.session_state.driver_start_time, default="08:30")
+    start_time_options = base_start_time_options.copy()
+    if current_driver_start_time not in start_time_options:
+        start_time_options.append(current_driver_start_time)
+        start_time_options = sorted(start_time_options, key=parse_hhmm_to_minutes)
+    start_time_idx = start_time_options.index(current_driver_start_time)
+    start_time_str = st.selectbox("🕒 TRIP_START_TIME", start_time_options, index=start_time_idx, key="trip_start_time_selector")
+    st.session_state.driver_start_time = start_time_str
     driver_start_min = parse_hhmm_to_minutes(start_time_str)
 
-    waiting_tol = st.slider("⏱️ TOLERANCE_FOR_WAITING_AT_PICKUP (min)", min_value=0, max_value=30, value=15)
+    waiting_tol = st.slider("⏱️ TOLERANCE_FOR_WAITING_AT_PICKUP (min)", min_value=0, max_value=30, value=int(st.session_state.waiting_tol))
+    st.session_state.waiting_tol = waiting_tol
+
+    st.markdown("---")
+    st.markdown("#### 🎚️ Matching weight factors")
+    st.caption("Set relative importance. Values are normalized so the final sum is exactly 1.00.")
+    raw_w_days = st.slider("📅 Weight: selected days", 0.0, 1.0, float(st.session_state.w_days), 0.01)
+    raw_w_radius = st.slider("📍 Weight: pickup radius", 0.0, 1.0, float(st.session_state.w_radius), 0.01)
+    raw_w_time = st.slider("🕒 Weight: trip start time", 0.0, 1.0, float(st.session_state.w_time), 0.01)
+    w_days, w_radius, w_time = normalize_match_weights(raw_w_days, raw_w_radius, raw_w_time)
+    st.session_state.w_days, st.session_state.w_radius, st.session_state.w_time = w_days, w_radius, w_time
+    st.progress(min(1.0, w_days + w_radius + w_time))
+    st.caption(f"Normalized weights → Days: {w_days:.2f}, Radius: {w_radius:.2f}, Time: {w_time:.2f}; Sum = {w_days + w_radius + w_time:.2f}")
+    match_threshold = st.slider("🏁 Minimum weighted match score", 0.50, 1.00, float(st.session_state.match_threshold), 0.05)
+    st.session_state.match_threshold = match_threshold
 
     cost_per_km = st.number_input("💶 Cost per km (EUR)", value=float(DEFAULT_COST_EUR_PER_KM), step=0.01)
 
@@ -1052,7 +1498,12 @@ office = (float(office_lat), float(office_lon))
 # ------------------------------------------------------------
 
 def refresh_samples_if_needed(office_lat, office_lon, home_lat, home_lon):
+    """Refresh passenger pool without overwriting offline Excel passengers."""
     key = (round(float(office_lat), 6), round(float(office_lon), 6), round(float(home_lat), 6), round(float(home_lon), 6))
+    if st.session_state.get("offline_mode", False) and st.session_state.get("offline_passenger_pool") is not None:
+        st.session_state.gps_key = key
+        st.session_state.passenger_pool = st.session_state.offline_passenger_pool.copy()
+        return
     if st.session_state.gps_key != key or st.session_state.passenger_pool is None:
         st.session_state.gps_key = key
         seed = abs(hash(key)) % (2**31 - 1)
@@ -1075,51 +1526,30 @@ nearest5_overall = top_k_least_detour(all_with_dist, k=TOP_K)
 
 
 # ------------------------------------------------------------
-# Filtering on parameter changes
+# Filtering on parameter changes using weighted compatibility
 # ------------------------------------------------------------
+all_with_dist = add_weighted_match_scores(
+    all_with_dist,
+    driver_days_set=driver_days,
+    pickup_radius_km=pickup_radius_km,
+    driver_start_min=driver_start_min,
+    driver_wait_tol=waiting_tol,
+    weight_days=w_days,
+    weight_radius=w_radius,
+    weight_time=w_time,
+)
+filtered_by_distance = all_with_dist[all_with_dist["radius_score"] >= 1.0].copy()
+filtered_by_day = all_with_dist[all_with_dist["day_score"] > 0].copy()
+filtered_by_time = all_with_dist[all_with_dist["time_score"] >= 1.0].copy()
+filtered = all_with_dist[all_with_dist["weighted_match_score"] >= float(match_threshold)].copy()
 
-# Stage 1: Distance filter
-filtered_by_distance = all_with_dist[all_with_dist["dist_to_driver_km"] <= float(pickup_radius_km)].copy()
-
-# Stage 2: Day filter
-filtered_by_day = filter_by_day(filtered_by_distance, driver_days)
-
-# Stage 3: Time filter
-filtered = filter_by_time(filtered_by_day, driver_start_min, waiting_tol)
-
-# Determine what to show
-use_fallback = False
-fallback_reason = ""
-has_secondary = False  # Flag to indicate if we're showing secondary (next best) passengers
-
-if len(filtered) > 0:
-    highlight5 = top_k_least_detour(filtered, k=TOP_K)
-    primary_ids = set(highlight5["passenger_id"].tolist())
-    
-    # If fewer than 5 filtered matches, fill with next best from overall sample
-    if len(highlight5) < TOP_K:
-        remaining_needed = TOP_K - len(highlight5)
-        # Get passengers from all_with_dist that are not in filtered results
-        not_in_filtered = all_with_dist[~all_with_dist["passenger_id"].isin(primary_ids)].copy()
-        # Get the ones with least detour
-        secondary = top_k_least_detour(not_in_filtered, k=remaining_needed)
-        highlight5_secondary = pd.concat([highlight5, secondary], ignore_index=True)
-        has_secondary = True
-    else:
-        highlight5_secondary = highlight5.copy()
-else:
-    highlight5 = nearest5_overall.copy()
-    highlight5_secondary = highlight5.copy()
-    primary_ids = set()
-    use_fallback = True
-    
-    # Analyze which filter is blocking passengers
-    if len(filtered_by_distance) == 0:
-        fallback_reason = "distance"
-    elif len(filtered_by_day) == 0:
-        fallback_reason = "day"
-    elif len(filtered) == 0:
-        fallback_reason = "time"
+highlight5, highlight5_secondary, primary_ids, has_secondary = pick_weighted_passengers(
+    all_with_dist, top_k=TOP_K, threshold=match_threshold
+)
+use_fallback = len(highlight5) == 0
+fallback_reason = "weighted score below threshold" if use_fallback else ""
+primary_highlight_ids = set(primary_ids)
+nearest5_overall = top_k_least_detour(all_with_dist, k=TOP_K)
 
 base_km, base_geom, base_used = safe_route(osrm_base, driver_home, office, ca_bundle_path, insecure_skip_verify)
 
@@ -1154,21 +1584,26 @@ def get_filter_suggestions(all_passengers, filtered_dist, filtered_day, filtered
     return suggestions
 
 
-with st.expander("🔍 Matching debug", expanded=False):
-    st.write("**Filtering stages:**")
-    st.write(f"1️⃣ Total samples: {len(all_with_dist)}")
-    st.write(f"2️⃣ Within pickup radius ({pickup_radius_km} km): {len(filtered_by_distance)}")
-    st.write(f"3️⃣ Matching your days ({', '.join(sorted(driver_days))}): {len(filtered_by_day)}")
-    st.write(f"4️⃣ Matching time window (±{waiting_tol} min around {start_time_str}): {len(filtered)}")
-    
+with st.expander("🔍 Weighted matching debug", expanded=False):
+    st.write("**Weighted matching stages:**")
+    st.write(f"1️⃣ Total passenger records: {len(all_with_dist)}")
+    st.write(f"2️⃣ Perfect pickup-radius fit: {len(filtered_by_distance)}")
+    st.write(f"3️⃣ Any selected-day overlap: {len(filtered_by_day)}")
+    st.write(f"4️⃣ Perfect time-window fit: {len(filtered_by_time)}")
+    st.write(f"5️⃣ Weighted score ≥ {match_threshold:.2f}: {len(filtered)}")
+    st.write(f"🎚️ Weights used: Days={w_days:.2f}, Radius={w_radius:.2f}, Time={w_time:.2f}, Sum={w_days+w_radius+w_time:.2f}")
+    st.write("")
     if has_secondary:
-        num_primary = len(filtered)
-        num_secondary = len(highlight5_secondary) - num_primary
-        st.write(f"\n**Result:** ✅ Found {num_primary} matched + {num_secondary} suggested alternatives")
+        st.write(f"**Result:** ✅ {len(highlight5)} primary weighted matches + {len(highlight5_secondary)-len(highlight5)} next-best alternatives")
+    elif use_fallback:
+        st.write("**Result:** ⚠️ No passenger crossed the weighted threshold; showing next-best day + distance matches.")
     else:
-        st.write(f"\n**Result:** {'✅ Showing matched passengers' if not use_fallback else f'❌ No matches - blocking filter: {fallback_reason}'}")
-    
-    st.write(f"**Shown:** {len(highlight5_secondary)} passengers total")
+        st.write(f"**Result:** ✅ Showing {len(highlight5)} primary weighted matches")
+    st.dataframe(
+        highlight5_secondary[["passenger_id", "match_percent", "match_tier", "day_score", "radius_score", "time_score", "dist_to_driver_km", "match_source"]],
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 # ------------------------------------------------------------
@@ -1176,7 +1611,7 @@ with st.expander("🔍 Matching debug", expanded=False):
 # ------------------------------------------------------------
 
 with main:
-    st.markdown("#### 🗺️ Overall passengers (gray) + Matched (🟠 orange) + Suggested (🟡 yellow)")
+    st.markdown("#### 🗺️ Overall passengers (🔘) + Primary match (🟠) + Next-best alternatives (🟡)")
     
     # Show status message
     if use_fallback:
@@ -1218,14 +1653,14 @@ with main:
             color="#9E9E9E",
             fill=True,
             fill_opacity=0.55,
-            tooltip=f"{pid} | dist_to_driver={d:.2f} km"
+            tooltip=f"{pid} | dist={d:.2f} km | score={row.get('match_percent', 0):.1f}%"
         ).add_to(m)
 
     # Draw primary passengers (matched filters) in orange
     for _, row in highlight5_secondary.iterrows():
         pid = row["passenger_id"]
         d = float(row["dist_to_driver_km"])
-        tooltip = f"{pid} | dist_to_driver={d:.2f} km | start={row['trip_start_time']} | days={row['days']}"
+        tooltip = f"{pid} | {row.get('match_tier', 'Match')} | score={row.get('match_percent', 0):.1f}% | dist={d:.2f} km | start={row['trip_start_time']} | days={row['days']}"
         
         # Determine color based on whether it's primary or secondary
         is_primary = pid in primary_highlight_ids
@@ -1245,17 +1680,14 @@ with main:
                         color=marker_color, weight=2, opacity=0.35).add_to(m)
 
     # Add routes for selected passengers
-    # IMPORTANT: use deterministic passenger-ID order to keep route + any numbering consistent
-    selected_ids = list(st.session_state.selected_profiles.keys()) if st.session_state.selected_profiles else []
+    selected_ids = set(st.session_state.selected_passengers)
     if len(selected_ids) > 0 and st.session_state.selected_profiles:
-        selected_stops = [(float(st.session_state.selected_profiles[pid]["home_lat"]),
+        selected_stops = [(float(st.session_state.selected_profiles[pid]["home_lat"]), 
                           float(st.session_state.selected_profiles[pid]["home_lon"])) for pid in selected_ids]
         try:
-            order_idx, best_total_km, used_all, _is_exact = optimal_best_order_indices(
+            ordered_stops, best_total_km, used_all = greedy_best_order(
                 osrm_base, driver_home, selected_stops, office, ca_bundle_path, insecure_skip_verify
             )
-            ordered_stops = [selected_stops[i] for i in order_idx]
-            st.session_state.selected_route_order = [selected_ids[i] for i in order_idx]
             # Draw the optimized route
             route_coords = [driver_home]
             for stop in ordered_stops:
@@ -1273,7 +1705,7 @@ with main:
     
     st_folium(m, width=None, height=560)
 
-    st.markdown("#### 👥 Highlighted passengers (Top 5 nearest to centroid)")
+    st.markdown("#### 👥 Gamified passenger matches")
     
     # Display passengers as cards instead of table
     # Calculate available seats based on current DRIVER'S confirmed and pending passengers (filter by driver_id)
@@ -1316,11 +1748,21 @@ with main:
                 break
 
         # Build badge HTML separately (avoids nested f-string issues)
-        badge_html = ""
-        if not is_primary:
-            badge_html = ('<span style="background:#ffd600;color:#333;'
-                        'padding:2px 8px;border-radius:12px;font-size:10px;'
-                        'font-weight:bold;">💡 Suggested alternative</span>')
+        tier = row.get("match_tier", "Match")
+        match_percent = float(row.get("match_percent", 0.0))
+        if is_primary:
+            badge_label = f"🏆 {tier} · {match_percent:.1f}%"
+            badge_bg = "#FF6D00"
+            badge_color = "#fff"
+        else:
+            badge_label = f"💡 Backup · {match_percent:.1f}%"
+            badge_bg = "#FFD600"
+            badge_color = "#333"
+        badge_html = (
+            f'<span style="background:{badge_bg};color:{badge_color};'
+            f'padding:2px 8px;border-radius:12px;font-size:10px;'
+            f'font-weight:bold;">{badge_label}</span>'
+        )
 
         # Build full card HTML as a single string variable
         card_html = (
@@ -1334,11 +1776,13 @@ with main:
             f'<span style="font-size:12px;color:#666;">Interests:</span> {row["interests"]}<br/>'
             f'<span style="font-size:11px;color:#888;">'
             f'📍 Distance: {row["dist_to_driver_km"]:.2f} km | '
-            f'�️ Detour: {row.get("detour_km", 0):.2f} km | '
+            f'↪️ Detour: {row.get("detour_km", 0):.2f} km | '
             f'🕒 Start: {row["trip_start_time"]} | '
             f'📅 Days: {row["days"]}</span><br/>'
+            f'<span style="font-size:11px;color:#777;">'
+            f'🎚️ Score parts → Days {row.get("day_score",0):.2f}, Radius {row.get("radius_score",0):.2f}, Time {row.get("time_score",0):.2f}</span><br/>'
             f'<span style="font-size:11px;color:#999;font-style:italic;">'
-            f'✓ On-the-way passenger: minimal route deviation to pickup</span>'
+            f'{row.get("match_source", "Weighted match")} · after score filtering, cards are ordered by least distance</span>'
             f'</div>'
         )
 
@@ -1445,16 +1889,17 @@ with right:
   <hr/>
   {badge_html}
   <hr/>
+  <h4 style="margin:0 0 8px 0;">🎮 Rewards</h4>
   <div class="metricRow">
     <div class="metricBox"><div class="metricLabel">Level</div><div class="metricValue">{level}</div></div>
     <div class="metricBox"><div class="metricLabel">XP</div><div class="metricValue">{xp}</div></div>
-    <div class="metricBox"><div class="metricLabel">Coins</div><div class="metricValue">€{coins:.2f}</div></div>
+    <div class="metricBox"><div class="metricLabel">Coins</div><div class="metricValue">{coins:.2f}</div></div>
     <div class="metricBox"><div class="metricLabel">Fairness</div><div class="metricValue">{fairness_score:.2f}</div></div>
     <div class="metricBox"><div class="metricLabel">Offset</div><div class="metricValue">{offset_pct:.0f}%</div></div>
   </div>
   <hr/>
+  <h4 style="margin:0 0 8px 0;">💶 Monetary benefits</h4>
   <div class="muted">
-    <b>Key numbers:</b><br/>
     Solo: {base_km:.2f} km (€{solo_cost:.2f})<br/>
     Shared: {best_total_km:.2f} km (€{shared_cost:.2f}) | Detour: +{detour_km:.2f} km<br/>
     Revenue: €{revenue:.2f} | Extra pickup cost: €{incremental_cost:.2f}<br/>
@@ -1478,6 +1923,7 @@ with right:
             rows.append({
                 "Passenger": pid,
                 "Solo to office (km)": round(b["passenger_solo_km"], 2),
+                "Solo to office (€)": round(b["solo_avoided_cost"], 2),
                 "Assigned detour (km)": round(b["assigned_detour_km"], 2),
                 "(1-α)*solo avoided (€)": round((1.0 - alpha) * b["solo_avoided_cost"], 2),
                 "Detour cost (€)": round(b["detour_cost"], 2),
@@ -1491,6 +1937,10 @@ with right:
             remove_ids = set(selected_profiles.keys())
             st.session_state.last_sent_email_previews = []
             st.session_state.passenger_breakdown = breakdown  # Store breakdown for preview section
+            request_batch_id = f"{st.session_state.driver_id}_{now_local().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
+            batch_total_detour_km = float(econ.get("total_detour_km", 0.0) or 0.0)
+            batch_total_detour_cost = float(econ.get("total_detour_cost", 0.0) or 0.0)
+            batch_original_passenger_count = int(len(remove_ids))
 
             for pid in remove_ids:
                 pr = selected_profiles[pid]
@@ -1505,6 +1955,10 @@ with right:
                     "office_label": office_label,
                     "driver_start_time": start_time_str,
                     "payment_eur": float(breakdown.get(pid, {}).get("payment", 0.0) or 0.0),
+                    "request_batch_id": request_batch_id,
+                    "batch_total_detour_km": batch_total_detour_km,
+                    "batch_total_detour_cost": batch_total_detour_cost,
+                    "batch_original_passenger_count": batch_original_passenger_count,
                     "coins_val": 0.0,
                     "co2_saved_kg": float(max(0.0, breakdown.get(pid, {}).get("passenger_solo_km", 0.0) or 0.0) * CO2_PER_KM_KG),
                     "alpha": alpha,
@@ -1528,7 +1982,19 @@ with right:
                     "passenger_profile": pr,
                     "office_label": office_label,
                     "driver_start_time": start_time_str,
+                    # Initial preview payment assumes all selected passengers accept.
+                    # Final payment is recalculated after responses by splitting total detour
+                    # equally among the accepted passengers only.
                     "payment_eur": _payment,
+                    "solo_avoided_cost": float(breakdown.get(pid, {}).get("solo_avoided_cost", 0.0) or 0.0),
+                    "passenger_solo_km": _passenger_solo_km,
+                    "assigned_detour_km": float(breakdown.get(pid, {}).get("assigned_detour_km", 0.0) or 0.0),
+                    "detour_cost": float(breakdown.get(pid, {}).get("detour_cost", 0.0) or 0.0),
+                    "request_batch_id": request_batch_id,
+                    "batch_total_detour_km": batch_total_detour_km,
+                    "batch_total_detour_cost": batch_total_detour_cost,
+                    "batch_original_passenger_count": batch_original_passenger_count,
+                    "settled": False,
                     "coins_val": 0.0,
                     "co2_saved_kg": _co2_saved,
                 })
